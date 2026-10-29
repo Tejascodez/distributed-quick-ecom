@@ -123,7 +123,10 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   tested end to end. Containers start once per JVM and are shared by all test classes.
 - `inventory-service`: integration tests against Postgres + Redis + Kafka containers: reservation paths and
   redelivery, the reconciler, 500 buyers racing for 10 units, and the saga over real Kafka including the DLT.
-- `order-service`: webhook HMAC verification (unit).
+- `order-service`: webhook HMAC verification (unit), plus integration tests against Postgres + Redis + Kafka
+  containers with the catalog and address clients mocked: every saga path including out-of-order and duplicate
+  payments, refunds and the amount check (asserted on `outbox_events`), racing inventory/payment replies,
+  50 parallel checkouts with one Idempotency-Key, the signed webhook over HTTP, the timeout job, and the DLT.
 
 ## Checkout saga
 
