@@ -7,7 +7,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
-/** Saga replies. OptimisticLockException is retried by Kafka's default error handler. */
+/** Saga replies. Optimistic-lock conflicts are retried, unprocessable records dead-lettered (see KafkaConfig). */
 @Component
 class SagaListener {
 
@@ -33,9 +33,9 @@ class SagaListener {
     void onPaymentResult(String payload) {
         var event = json.readValue(payload, PaymentResultEvent.class);
         if (event.success()) {
-            orders.onPaymentSucceeded(event.orderId());
+            orders.onPaymentSucceeded(event.orderId(), event.gatewayReference(), event.amount());
         } else {
-            orders.onPaymentFailed(event.orderId());
+            orders.onPaymentFailed(event.orderId(), event.gatewayReference());
         }
     }
 }

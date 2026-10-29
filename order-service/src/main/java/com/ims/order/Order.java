@@ -56,6 +56,9 @@ public class Order {
     @Column(name = "payment_status")
     private PaymentStatus paymentStatus;
 
+    @Column(name = "payment_reference")
+    private String paymentReference;
+
     @Column(name = "idempotency_key")
     private String idempotencyKey;
 
@@ -111,6 +114,11 @@ public class Order {
         this.paymentStatus = paymentStatus;
     }
 
+    void paymentSucceeded(String gatewayReference) {
+        this.paymentStatus = PaymentStatus.SUCCESS;
+        this.paymentReference = gatewayReference;
+    }
+
     @PreUpdate
     void touch() {
         updatedAt = Instant.now();
@@ -126,5 +134,6 @@ public class Order {
     public BigDecimal getPayableAmount() { return payableAmount; }
     public OrderStatus getOrderStatus() { return orderStatus; }
     public PaymentStatus getPaymentStatus() { return paymentStatus; }
+    public String getPaymentReference() { return paymentReference; }
     public List<OrderItem> getItems() { return items; }
 }

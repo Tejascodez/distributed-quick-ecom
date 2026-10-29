@@ -1,5 +1,6 @@
 package com.ims.order;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 
 import com.ims.common.events.PaymentResultEvent;
@@ -25,7 +26,8 @@ import tools.jackson.databind.json.JsonMapper;
 @RestController
 class PaymentWebhookController {
 
-    record WebhookRequest(UUID orderId, String gatewayReference, boolean success) {
+    /** amount is what the gateway captured; the saga refunds it unless it matches the order's payable amount. */
+    record WebhookRequest(UUID orderId, String gatewayReference, boolean success, BigDecimal amount) {
     }
 
     private static final Logger log = LoggerFactory.getLogger(PaymentWebhookController.class);
@@ -60,7 +62,10 @@ class PaymentWebhookController {
         if (req.orderId() == null || req.gatewayReference() == null || req.gatewayReference().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "orderId and gatewayReference are required");
         }
+        if (req.success() && (req.amount() == null || req.amount().signum() <= 0)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A successful payment needs a positive amount");
+        }
         outbox.publish(req.success() ? Topics.PAYMENT_SUCCESS : Topics.PAYMENT_FAILED, req.orderId(),
-                new PaymentResultEvent(req.orderId(), req.gatewayReference(), req.success()));
+                new PaymentResultEvent(req.orderId(), req.gatewayReference(), req.success(), req.amount()));
     }
 }
