@@ -12,7 +12,17 @@ final class StockKeys {
     }
 
     static String reservation(UUID storeId, UUID orderId) {
-        return "res:{" + storeId + "}:" + orderId;
+        return reservationPrefix(storeId) + orderId;
+    }
+
+    /** Prefix shared by every reservation hash of one store; the order id follows it. */
+    static String reservationPrefix(UUID storeId) {
+        return "res:{" + storeId + "}:";
+    }
+
+    /** The trailing id of a stock or reservation key. */
+    static UUID trailingId(String key) {
+        return UUID.fromString(key.substring(key.lastIndexOf(':') + 1));
     }
 
     private StockKeys() {
