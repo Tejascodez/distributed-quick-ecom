@@ -1,7 +1,13 @@
 package com.ims.inventory;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
+import com.ims.common.events.Topics;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -33,6 +39,19 @@ abstract class IntegrationTestBase {
         POSTGRES.start();
         REDIS.start();
         KAFKA.start();
+        createTopics();
+    }
+
+    /** Topics exist before the listeners subscribe, so the first test doesn't wait on auto-creation. */
+    private static void createTopics() {
+        List<String> names = List.of(Topics.ORDER_CREATED, Topics.ORDER_PAID, Topics.ORDER_CANCELLED,
+                Topics.INVENTORY_RESERVED, Topics.INVENTORY_REJECTED,
+                Topics.ORDER_CREATED + "-dlt", Topics.ORDER_PAID + "-dlt", Topics.ORDER_CANCELLED + "-dlt");
+        try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers()))) {
+            admin.createTopics(names.stream().map(n -> new NewTopic(n, 1, (short) 1)).toList()).all().get();
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not create test topics", e);
+        }
     }
 
     @Autowired
