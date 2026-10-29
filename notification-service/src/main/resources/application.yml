@@ -1,0 +1,21 @@
+server:
+  port: 8106
+
+spring:
+  application:
+    name: notification-service
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: notification-service
+      auto-offset-reset: latest
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

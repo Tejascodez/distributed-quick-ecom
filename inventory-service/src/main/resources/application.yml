@@ -1,0 +1,31 @@
+server:
+  port: 8104
+
+spring:
+  config:
+    # Secrets come from .env (repo root, or one level up when started from a module dir) or real env vars.
+    import: optional:file:.env[.properties],optional:file:../.env[.properties]
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/inventory_db?sslmode=${DB_SSLMODE:require}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: inventory-service
+      auto-offset-reset: earliest
+
+ims:
+  reservation-ttl: 10m
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

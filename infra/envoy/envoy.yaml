@@ -1,0 +1,130 @@
+# Envoy API gateway: routing, JWT validation, local rate limiting.
+# SSL termination: add a transport_socket with your certs to the listener in non-local envs.
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: public
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                upgrade_configs:
+                  - upgrade_type: websocket
+                route_config:
+                  name: routes
+                  virtual_hosts:
+                    - name: ims
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/api/v1/auth" }
+                          route: { cluster: user_auth_service }
+                        - match: { prefix: "/.well-known/jwks.json" }
+                          route: { cluster: user_auth_service }
+                        - match: { prefix: "/api/v1/users" }
+                          route: { cluster: user_auth_service }
+                        - match: { prefix: "/api/v1/stores" }
+                          route: { cluster: dark_store_service }
+                        - match: { prefix: "/api/v1/orders" }
+                          route: { cluster: order_service }
+                        - match: { prefix: "/api/v1/payments" }
+                          route: { cluster: order_service }
+                        - match: { prefix: "/api/v1/inventory" }
+                          route: { cluster: inventory_service }
+                        - match: { prefix: "/api/v1/delivery" }
+                          route: { cluster: delivery_service }
+                        - match: { prefix: "/ws" }
+                          route: { cluster: notification_service, timeout: 0s }
+                http_filters:
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: http_local_rate_limiter
+                      token_bucket: { max_tokens: 200, tokens_per_fill: 100, fill_interval: 1s }
+                      filter_enabled:
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      filter_enforced:
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header: { key: x-local-rate-limit, value: "true" }
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        ims_auth:
+                          issuer: ims-auth
+                          from_headers:
+                            - { name: Authorization, value_prefix: "Bearer " }
+                          from_params: ["access_token"]   # browsers can't set headers on WebSocket upgrades
+                          forward: true
+                          claim_to_headers:
+                            - { header_name: x-user-id, claim_name: sub }
+                            - { header_name: x-user-role, claim_name: role }
+                          remote_jwks:
+                            http_uri:
+                              uri: http://host.docker.internal:8101/.well-known/jwks.json
+                              cluster: user_auth_service
+                              timeout: 2s
+                            cache_duration: 300s
+                            async_fetch: { fast_listener: false }
+                            retry_policy: { num_retries: 3 }
+                      rules:
+                        - match: { prefix: "/api/v1/auth" }
+                        - match: { prefix: "/.well-known/jwks.json" }
+                        - match: { prefix: "/api/v1/payments/webhook" }   # gateway callback, verified by signature
+                        - match: { prefix: "/" }
+                          requires: { provider_name: ims_auth }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: user_auth_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: user_auth_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8101 } } } }] }]
+    - name: dark_store_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: dark_store_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8102 } } } }] }]
+    - name: order_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: order_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8103 } } } }] }]
+    - name: inventory_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: inventory_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8104 } } } }] }]
+    - name: delivery_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: delivery_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8105 } } } }] }]
+    - name: notification_service
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY   # Docker Desktop: host.docker.internal IPv6 is not routable
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: notification_service
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8106 } } } }] }]

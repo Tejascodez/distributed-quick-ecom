@@ -1,0 +1,36 @@
+server:
+  port: 8101
+
+spring:
+  config:
+    # Secrets come from .env (repo root, or one level up when started from a module dir) or real env vars.
+    import: optional:file:.env[.properties],optional:file:../.env[.properties]
+  application:
+    name: user-auth-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/auth_db?sslmode=${DB_SSLMODE:require}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+ims:
+  # Optional: this user is promoted to ADMIN at startup (how the first admin gets created).
+  bootstrap-admin-phone: ${BOOTSTRAP_ADMIN_PHONE:}
+  jwt:
+    issuer: ims-auth
+    ttl: 15m          # access token; short because it can't be revoked
+    refresh-ttl: 30d
+    private-key: ${JWT_PRIVATE_KEY}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

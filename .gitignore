@@ -1,0 +1,25 @@
+# Build output
+target/
+*.log
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Secrets: real values live in .env (see .env.example), never in git
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.der
+*.p12
+*.jks
+*.keystore
+credentials*.json
+service-account*.json
+
+# Tool leftovers (Copilot Java-upgrade run)
+.github/modernize/

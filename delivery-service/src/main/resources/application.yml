@@ -1,0 +1,32 @@
+server:
+  port: 8105
+
+spring:
+  config:
+    # Secrets come from .env (repo root, or one level up when started from a module dir) or real env vars.
+    import: optional:file:.env[.properties],optional:file:../.env[.properties]
+  application:
+    name: delivery-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/delivery_db?sslmode=${DB_SSLMODE:require}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: delivery-service
+      auto-offset-reset: earliest
+
+ims:
+  store-url: http://localhost:8102
+  dispatch-radius-km: 3
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
