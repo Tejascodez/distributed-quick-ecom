@@ -15,10 +15,6 @@ final class StockKeys {
         return "res:{" + storeId + "}:" + orderId;
     }
 
-    static UUID productId(String stockKey) {
-        return UUID.fromString(stockKey.substring(stockKey.lastIndexOf(':') + 1));
-    }
-
     private StockKeys() {
     }
 }

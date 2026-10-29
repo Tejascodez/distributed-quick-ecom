@@ -29,8 +29,9 @@ class InventoryEventsListener {
         var result = reservations.reserve(event.orderId(), event.storeId(), event.items());
         boolean ok = result != ReservationService.Result.OUT_OF_STOCK;
         var reply = new InventoryResultEvent(event.orderId(), event.storeId(), ok, ok ? null : "OUT_OF_STOCK");
+        // Block until the broker acks: a failed send throws, Kafka redelivers, and the idempotent reserve replies again.
         kafka.send(ok ? Topics.INVENTORY_RESERVED : Topics.INVENTORY_REJECTED,
-                event.orderId().toString(), json.writeValueAsString(reply));
+                event.orderId().toString(), json.writeValueAsString(reply)).join();
     }
 
     @KafkaListener(topics = Topics.ORDER_PAID)
