@@ -14,17 +14,20 @@ class OrderEventsListener {
 
     private final SimpMessagingTemplate ws;
     private final PushSender push;
+    private final OrderOwners owners;
     private final JsonMapper json;
 
-    OrderEventsListener(SimpMessagingTemplate ws, PushSender push, JsonMapper json) {
+    OrderEventsListener(SimpMessagingTemplate ws, PushSender push, OrderOwners owners, JsonMapper json) {
         this.ws = ws;
         this.push = push;
+        this.owners = owners;
         this.json = json;
     }
 
     @KafkaListener(topics = Topics.ORDER_STATUS_CHANGED)
     void onStatusChanged(String payload) {
         var event = json.readValue(payload, OrderStatusChangedEvent.class);
+        owners.remember(event.orderId(), event.userId());
         ws.convertAndSend("/topic/orders/" + event.orderId(), event);
         push.send(event.userId(), "Order update", "Your order is now " + event.status());
     }
@@ -33,6 +36,7 @@ class OrderEventsListener {
     @KafkaListener(topics = Topics.ORDER_PAID)
     void onOrderPaid(String payload) {
         var event = json.readValue(payload, OrderPaidEvent.class);
+        owners.remember(event.orderId(), event.userId());
         ws.convertAndSend("/topic/stores/" + event.storeId() + "/picking", event);
     }
 

@@ -22,7 +22,13 @@ spring:
       auto-offset-reset: earliest
 
 ims:
-  reservation-ttl: 10m
+  # Longer than order-service's checkout-timeout (10m): the order side decides cancellations, and this sweeper
+  # is only a backstop. Equal values let a 9:59 payment lose its hold before order-paid arrives.
+  reservation-ttl: 15m
+  reconcile:
+    interval: 5m
+    # Report-only by default: turn on once the drift logs have been checked against real traffic.
+    repair: false
 
 management:
   endpoints:

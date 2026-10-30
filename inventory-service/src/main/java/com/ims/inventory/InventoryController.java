@@ -11,7 +11,6 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -43,8 +42,11 @@ class InventoryController {
         return new StockView(storeId, productId, value == null ? 0 : Long.parseLong(value));
     }
 
+    /**
+     * Not @Transactional on purpose: the upsert commits on its own before Redis is incremented. If Redis fails
+     * afterwards it under-counts (safe; reconciliation tops it up), never selling units Postgres doesn't have.
+     */
     @PostMapping("/{storeId}/{productId}/restock")
-    @Transactional
     StockView restock(Caller caller, @PathVariable UUID storeId, @PathVariable UUID productId,
                       @Valid @RequestBody RestockRequest req) {
         caller.requireAnyRole(Roles.ADMIN, Roles.STORE_OPS);

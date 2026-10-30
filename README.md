@@ -75,6 +75,18 @@ X-Webhook-Signature: hex(HMAC-SHA256(PAYMENT_WEBHOOK_SECRET, timestamp + "." + r
 
 Requests with a missing or wrong signature, or a timestamp more than 5 minutes old (replays), get `401`.
 
+Body:
+
+```json
+{"orderId": "<uuid>", "gatewayReference": "pay_123", "success": true, "amount": 224.00}
+```
+
+`amount` (what the gateway captured) is required when `success` is true. Each `gatewayReference` is applied once,
+so redelivered webhooks are ignored. A captured payment that can't pay for the order is refunded via
+`payment-refund-requested`: the wrong `amount` (the order stays unpaid so the customer can pay again), a second
+payment for an already-paid order, or a payment for a cancelled order. A failed attempt never cancels an order
+whose payment already succeeded.
+
 All client traffic goes through `http://localhost:8000`. Get a token from
 `POST /api/v1/auth/register` or `/login` and send `Authorization: Bearer <token>`. Envoy validates it and
 forwards the user id to services as `X-User-Id`.
@@ -109,7 +121,25 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   against throwaway Postgres + Redis containers, never Neon. Each request is verified against the
   service's JWKS and forwarded with Envoy's headers, so auth, roles, refresh rotation and addresses are
   tested end to end. Containers start once per JVM and are shared by all test classes.
-- `order-service`: webhook HMAC verification (unit).
+- `dark-store-service`: integration tests over HTTP against a PostGIS container: nearest serving store,
+  overlapping delivery areas, taking a store out of service and back, role checks, coordinate and radius
+  validation, and the capped product lookup.
+- `inventory-service`: integration tests against Postgres + Redis + Kafka containers: reservation paths and
+  redelivery, the reconciler, 500 buyers racing for 10 units, and the saga over real Kafka including the DLT.
+- `order-service`: webhook HMAC verification (unit), plus integration tests against Postgres + Redis + Kafka
+  containers with the catalog and address clients mocked: every saga path including out-of-order and duplicate
+  payments, refunds and the amount check (asserted on `outbox_events`), delivery progress (unpacked pickups,
+  out-of-order, duplicate and post-cancel steps), racing inventory/payment replies,
+  50 parallel checkouts with one Idempotency-Key, the signed webhook over HTTP, the timeout job, and the DLT.
+- `delivery-service`: integration tests against Postgres + Redis + Kafka containers: three dispatchers racing
+  over 100 orders and 10 constantly pinging riders (no rider double-booked), claim/ping/offline/stale-rider
+  races, Redis losing busy markers, cancellations before and after assignment and pickup, a starved store,
+  the rider endpoints over HTTP, delivery-progress publishing and resends, and order-paid / order-cancelled
+  over Kafka including the DLT.
+- `notification-service`: integration tests against Redis + Kafka containers with order-service mocked, over a
+  real STOMP WebSocket sent the way Envoy forwards it: who may subscribe to which topic, clients trying to
+  publish fake rider positions, refused upgrades (no identity, foreign origin), events and rider pings relayed
+  to the right subscribers, and the DLT.
 
 ## Checkout saga
 
@@ -121,33 +151,65 @@ POST /api/v1/payments/webhook
   order-service ── outbox ──> payment-success | payment-failed
   order-service: reserved + paid ──> PAID ──> order-paid-event
      inventory-service: confirm.lua + Postgres write-behind
-     delivery-service: queue -> nearest idle rider (GEOSEARCH + ZREM claim) ──> rider-assigned
+     delivery-service: queue -> nearest idle rider (GEOSEARCH + claim.lua) ──> rider-assigned
      notification-service: picker dashboard + customer WebSocket
+  Store ops: PICKING ──> PACKED (optional: pickup moves an unpacked order on)
+  Rider picks up / hands over ──> delivery-progress ──> OUT_FOR_DELIVERY ──> DELIVERED
   Any failure / 10-min timeout ──> CANCELLED ──> order-cancelled ──> release.lua
+     delivery-service: drop from queue, end the delivery and free the rider (even after pickup)
+     paid already ──> payment-refund-requested
 ```
 
 Every status change also emits `order-status-changed` for notifications.
 
 ### Topics
 `order-created`, `inventory-reserved`, `inventory-rejected`, `payment-success`, `payment-failed`,
-`order-paid-event`, `order-cancelled`, `rider-assigned`, `order-status-changed`. See `common/.../Topics.java`.
+`payment-refund-requested`, `order-paid-event`, `order-cancelled`, `rider-assigned`, `delivery-progress`,
+`order-status-changed`. See `common/.../Topics.java`.
 
 ## Design notes
 
 - **Inventory**: Redis holds `sellable = available_stock - reserved_stock`. Keys use a `{storeId}` hash tag,
-  so a multi-SKU Lua reservation stays on one Redis Cluster slot. Holds expire after 10 minutes
-  (sweeper + Redis TTL backstop).
+  so a multi-SKU Lua reservation stays on one Redis Cluster slot. The `stock_reservations` ledger in Postgres
+  records every hold (HELD / CONFIRMED / RELEASED); each step updates it so that Kafka redelivery repairs a
+  half-applied reserve, confirm or release. Holds expire after 15 minutes, longer than the 10-minute checkout
+  timeout, so order-service decides cancellations and the sweeper is only a backstop. `StockReconciler`
+  checks Redis and Postgres against the ledger every 5 minutes (report-only unless `ims.reconcile.repair`).
 - **Outbox**: order-service never writes to Kafka directly. Debezium's EventRouter routes rows by
   `event_type` (= topic name), keyed by `aggregate_id` (= order id), which keeps per-order ordering.
-- **Concurrency**: `orders.version` (optimistic locking) serializes concurrent saga replies. Kafka's
-  default error handler retries on conflict.
+- **Concurrency**: `orders.version` (optimistic locking) serializes concurrent saga replies; conflicts are
+  retried. Records that can never succeed (malformed, unknown order) go to `<topic>-dlt` in every consuming
+  service.
+- **Rider pool**: online, idle riders live in a Redis GEO set. `claim.lua` takes a rider out of the pool and
+  sets their busy marker in one step, and `ping.lua` only re-adds a rider who is online and not busy, so a
+  location ping racing a claim can't double-book anyone. A claim's marker has a 2-minute TTL until its
+  assignment commits. Riders silent for 60s leave the pool. Postgres is the source of truth for busy riders
+  (a partial unique index allows one open assignment per rider), and markers are rebuilt from it at startup
+  and every 15s. The dispatch queue is drained per store, so a store with no riders doesn't block the rest.
+- **Delivery status**: OUT_FOR_DELIVERY and DELIVERED are set only by the rider's pickup and hand-over (ops
+  get 400), sent as `delivery-progress` events keyed by order id. delivery-service marks each step published
+  once the broker acknowledges it and resends the rest, and order-service applies each step once whatever order
+  they arrive in. A cancel always wins: once order-service has refunded, delivery ends the assignment even after
+  pickup, the rider's "delivered" gets 409, and late steps for the cancelled order are ignored.
+- **WebSocket access**: Envoy authenticates the upgrade; `SubscriptionGuard` then checks every STOMP frame.
+  Order topics (status and live rider location) are for the order's customer, store ops and admin; store
+  picking feeds for store ops and admin. Clients can't SEND at all, since the simple broker would relay it to
+  subscribers. Order owners are learned from order events and cached in Redis; a subscriber the events haven't
+  covered yet is checked by asking order-service, as them, for the order.
 - **Geo**: `ST_DWithin` on a geography GiST index for "which store serves me". Stores also carry an H3
-  res-8 cell for cell-based partitioning and caching.
+  res-8 cell for cell-based partitioning and caching. Store ops can mark a store OVERLOADED or INACTIVE
+  (`PATCH /api/v1/stores/{id}/status`); only ACTIVE stores are found or accept checkouts.
 
 ## Known gaps (next steps)
 
+- Store ops can watch any store's picking feed and any order: there's no staff-to-store mapping yet.
 - Push uses a logging stub; wire up the Firebase Admin SDK when credentials are available.
 - Rider matching is greedy nearest-first per batch; replace with min-cost matching.
-- inventory-service and delivery-service publish to Kafka directly (not via an outbox).
+- A rider whose assignment is cancelled isn't notified in-app (they find out when "delivered" returns 409), and
+  returning a cancelled order's items to the store isn't tracked.
+- inventory-service and delivery-service publish to Kafka directly (not via an outbox). inventory-service waits
+  for the broker ack and relies on idempotent redelivery instead.
+- Nothing consumes `payment-refund-requested` yet; a payment service would call the gateway's refund API.
+- Cancelling an order after picking doesn't return its (already deducted) stock; restock it manually.
 - Auth signing key is generated per boot (dev only). Load it from a secret store in real deployments.
 - No product-admin API yet: seed `store_db.products` with SQL.

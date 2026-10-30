@@ -1,5 +1,7 @@
 package com.ims.order;
 
+import com.ims.common.events.DeliveryProgressEvent;
+import com.ims.common.events.DeliveryProgressEvent.Stage;
 import com.ims.common.events.InventoryResultEvent;
 import com.ims.common.events.PaymentResultEvent;
 import com.ims.common.events.Topics;
@@ -7,7 +9,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
-/** Saga replies. OptimisticLockException is retried by Kafka's default error handler. */
+/** Saga replies and delivery progress. Optimistic-lock conflicts are retried, unprocessable records dead-lettered (see KafkaConfig). */
 @Component
 class SagaListener {
 
@@ -33,9 +35,19 @@ class SagaListener {
     void onPaymentResult(String payload) {
         var event = json.readValue(payload, PaymentResultEvent.class);
         if (event.success()) {
-            orders.onPaymentSucceeded(event.orderId());
+            orders.onPaymentSucceeded(event.orderId(), event.gatewayReference(), event.amount());
         } else {
-            orders.onPaymentFailed(event.orderId());
+            orders.onPaymentFailed(event.orderId(), event.gatewayReference());
+        }
+    }
+
+    @KafkaListener(topics = Topics.DELIVERY_PROGRESS)
+    void onDeliveryProgress(String payload) {
+        var event = json.readValue(payload, DeliveryProgressEvent.class);
+        if (event.stage() == Stage.PICKED_UP) {
+            orders.onPickedUp(event.orderId());
+        } else {
+            orders.onDelivered(event.orderId());
         }
     }
 }

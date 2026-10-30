@@ -14,6 +14,13 @@ spring:
       group-id: notification-service
       auto-offset-reset: latest
 
+ims:
+  order-url: http://localhost:8103
+  ws:
+    # Browser origins allowed to open the WebSocket (comma separated, patterns allowed). List the real web app
+    # origins in each environment instead of opening it to every site.
+    allowed-origins: http://localhost:[*]
+
 management:
   endpoints:
     web:

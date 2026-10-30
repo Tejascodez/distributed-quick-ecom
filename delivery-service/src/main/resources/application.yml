@@ -24,6 +24,8 @@ spring:
 ims:
   store-url: http://localhost:8102
   dispatch-radius-km: 3
+  # Riders that haven't pinged for this long leave the idle pool (app killed, phone off, no signal).
+  rider-stale-after: 60s
 
 management:
   endpoints:

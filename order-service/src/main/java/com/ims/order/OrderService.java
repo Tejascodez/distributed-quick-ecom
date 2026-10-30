@@ -6,7 +6,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -15,9 +14,13 @@ import com.ims.common.events.OrderCreatedEvent;
 import com.ims.common.events.OrderLine;
 import com.ims.common.events.OrderPaidEvent;
 import com.ims.common.events.OrderStatusChangedEvent;
+import com.ims.common.events.PaymentRefundRequestedEvent;
 import com.ims.common.events.Topics;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /** Owns order state and orchestrates the checkout saga (inventory + payment -> PAID). */
 @Service
@@ -26,6 +29,7 @@ public class OrderService {
     public record CheckoutLine(UUID productId, int quantity) {
     }
 
+    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
     private static final BigDecimal FREE_DELIVERY_THRESHOLD = new BigDecimal("199.00");
     private static final BigDecimal DELIVERY_FEE = new BigDecimal("25.00");
 
@@ -33,15 +37,23 @@ public class OrderService {
     private final CatalogClient catalog;
     private final AddressClient addresses;
     private final Outbox outbox;
+    private final PaymentAttempts payments;
+    private final TransactionTemplate tx;
 
-    OrderService(OrderRepository orders, CatalogClient catalog, AddressClient addresses, Outbox outbox) {
+    OrderService(OrderRepository orders, CatalogClient catalog, AddressClient addresses, Outbox outbox,
+                 PaymentAttempts payments, TransactionTemplate tx) {
         this.orders = orders;
         this.catalog = catalog;
         this.addresses = addresses;
         this.outbox = outbox;
+        this.payments = payments;
+        this.tx = tx;
     }
 
-    @Transactional
+    /**
+     * Not @Transactional: the address and catalog calls go over HTTP, and holding a DB connection while a
+     * downstream service is slow would drain the pool for every checkout. Only the writes run in a transaction.
+     */
     public Order create(UUID userId, UUID storeId, UUID addressId, List<CheckoutLine> lines, String idempotencyKey) {
         var address = addresses.find(userId, addressId)
                 .orElseThrow(() -> new IllegalArgumentException("Unknown delivery address " + addressId));
@@ -50,23 +62,27 @@ public class OrderService {
             throw new IllegalArgumentException("Store " + storeId + " does not deliver to this address");
         }
         Map<UUID, CatalogClient.ProductPrice> prices = catalog.prices(lines.stream().map(CheckoutLine::productId).toList())
-                .stream().collect(Collectors.toMap(CatalogClient.ProductPrice::id, Function.identity()));
-
-        Order order = new Order(newOrderNumber(), userId, storeId, addressId, idempotencyKey);
+                .stream().collect(Collectors.toMap(CatalogClient.ProductPrice::id, Function.identity(), (a, b) -> a));
         for (CheckoutLine line : lines) {
-            var price = prices.get(line.productId());
-            if (price == null) {
+            if (!prices.containsKey(line.productId())) {
                 throw new IllegalArgumentException("Unknown product " + line.productId());
             }
-            order.addItem(price.id(), price.name(), price.basePrice(), line.quantity());
         }
-        boolean freeDelivery = order.getTotalItemAmount().compareTo(FREE_DELIVERY_THRESHOLD) >= 0;
-        order.applyFees(freeDelivery ? BigDecimal.ZERO : DELIVERY_FEE, BigDecimal.ZERO);
-        orders.save(order);
 
-        outbox.publish(Topics.ORDER_CREATED, order.getId(), new OrderCreatedEvent(order.getId(), userId, storeId,
-                lines(order), order.getPayableAmount()));
-        return order;
+        return tx.execute(s -> {
+            Order order = new Order(newOrderNumber(), userId, storeId, addressId, idempotencyKey);
+            for (CheckoutLine line : lines) {
+                var price = prices.get(line.productId());
+                order.addItem(price.id(), price.name(), price.basePrice(), line.quantity());
+            }
+            boolean freeDelivery = order.getTotalItemAmount().compareTo(FREE_DELIVERY_THRESHOLD) >= 0;
+            order.applyFees(freeDelivery ? BigDecimal.ZERO : DELIVERY_FEE, BigDecimal.ZERO);
+            orders.save(order);
+
+            outbox.publish(Topics.ORDER_CREATED, order.getId(), new OrderCreatedEvent(order.getId(), userId, storeId,
+                    lines(order), order.getPayableAmount()));
+            return order;
+        });
     }
 
     @Transactional
@@ -86,32 +102,100 @@ public class OrderService {
         cancel(load(orderId), reason);
     }
 
+    /**
+     * A captured payment. Each gateway reference is applied once; any money that can't pay for this order
+     * (wrong amount, order already paid or cancelled) is refunded rather than kept.
+     */
     @Transactional
-    public void onPaymentSucceeded(UUID orderId) {
+    public void onPaymentSucceeded(UUID orderId, String gatewayReference, BigDecimal amount) {
+        if (!payments.recordFirst(gatewayReference, orderId, true, amount)) {
+            return; // webhook redelivered
+        }
         Order order = load(orderId);
-        if (order.getPaymentStatus() == PaymentStatus.SUCCESS) {
-            return;
-        }
         if (order.getOrderStatus() == OrderStatus.CANCELLED) {
-            order.setPaymentStatus(PaymentStatus.REFUNDED); // late payment on a dead order; trigger refund
+            requestRefund(order, gatewayReference, amount, "ORDER_CANCELLED");
+            order.setPaymentStatus(PaymentStatus.REFUNDED);
             return;
         }
-        order.setPaymentStatus(PaymentStatus.SUCCESS);
+        if (order.getPaymentStatus() == PaymentStatus.SUCCESS) {
+            requestRefund(order, gatewayReference, amount, "DUPLICATE_PAYMENT"); // paid twice, e.g. two tabs
+            return;
+        }
+        if (amount == null || amount.compareTo(order.getPayableAmount()) != 0) {
+            // The order stays unpaid, so the customer can pay the right amount before the checkout times out.
+            log.warn("Payment {} for order {} captured {} but {} is payable; refunding", gatewayReference, orderId,
+                    amount, order.getPayableAmount());
+            requestRefund(order, gatewayReference, amount, "AMOUNT_MISMATCH");
+            return;
+        }
+        order.paymentSucceeded(gatewayReference);
         if (order.getOrderStatus() == OrderStatus.INVENTORY_RESERVED) {
             markPaid(order);
         }
     }
 
     @Transactional
-    public void onPaymentFailed(UUID orderId) {
-        Order order = load(orderId);
-        if (order.getPaymentStatus() == PaymentStatus.PENDING) {
-            order.setPaymentStatus(PaymentStatus.FAILED);
+    public void onPaymentFailed(UUID orderId, String gatewayReference) {
+        if (!payments.recordFirst(gatewayReference, orderId, false, null)) {
+            return;
         }
+        Order order = load(orderId);
+        if (order.getPaymentStatus() != PaymentStatus.PENDING) {
+            // A failed attempt that arrives after another attempt succeeded must not cancel a paid order.
+            log.info("Ignoring failed payment {} for order {} with payment {}", gatewayReference, orderId,
+                    order.getPaymentStatus());
+            return;
+        }
+        order.setPaymentStatus(PaymentStatus.FAILED);
         cancel(order, "PAYMENT_FAILED");
     }
 
-    /** Fulfilment progress from the dark store dashboard / rider app. */
+    /** The rider has the order. Redelivered or late steps (already further along) are ignored. */
+    @Transactional
+    public void onPickedUp(UUID orderId) {
+        Order order = load(orderId);
+        if (ignoreDeliveryStep(order, "pickup")) {
+            return;
+        }
+        if (order.getOrderStatus().canTransitionTo(OrderStatus.OUT_FOR_DELIVERY)) {
+            changeStatus(order, OrderStatus.OUT_FOR_DELIVERY);
+        }
+    }
+
+    /** Handed to the customer. Also covers a pickup event that hasn't arrived (or was lost) yet. */
+    @Transactional
+    public void onDelivered(UUID orderId) {
+        Order order = load(orderId);
+        if (ignoreDeliveryStep(order, "delivery")) {
+            return;
+        }
+        if (order.getOrderStatus().canTransitionTo(OrderStatus.OUT_FOR_DELIVERY)) {
+            changeStatus(order, OrderStatus.OUT_FOR_DELIVERY);
+        }
+        if (order.getOrderStatus() == OrderStatus.OUT_FOR_DELIVERY) {
+            changeStatus(order, OrderStatus.DELIVERED);
+        }
+    }
+
+    /**
+     * A cancelled order stays cancelled: the customer has been refunded and delivery-service ends the delivery.
+     * An unpaid order can't have a rider, so that's a bug upstream and goes to the DLT.
+     */
+    private boolean ignoreDeliveryStep(Order order, String step) {
+        switch (order.getOrderStatus()) {
+            case CANCELLED -> {
+                log.warn("Ignoring {} of cancelled order {}; the rider returns it to the store", step, order.getId());
+                return true;
+            }
+            case CREATED, INVENTORY_RESERVED ->
+                    throw new IllegalStateException("Rider " + step + " for unpaid order " + order.getId());
+            default -> {
+                return false;
+            }
+        }
+    }
+
+    /** Fulfilment progress from the dark store dashboard. */
     @Transactional
     public void advance(UUID orderId, OrderStatus next) {
         Order order = load(orderId);
@@ -129,10 +213,16 @@ public class OrderService {
         }
         changeStatus(order, OrderStatus.CANCELLED);
         if (order.getPaymentStatus() == PaymentStatus.SUCCESS) {
+            requestRefund(order, order.getPaymentReference(), order.getPayableAmount(), reason);
             order.setPaymentStatus(PaymentStatus.REFUNDED);
         }
         outbox.publish(Topics.ORDER_CANCELLED, order.getId(),
                 new OrderCancelledEvent(order.getId(), order.getStoreId(), lines(order), reason));
+    }
+
+    private void requestRefund(Order order, String gatewayReference, BigDecimal amount, String reason) {
+        outbox.publish(Topics.PAYMENT_REFUND_REQUESTED, order.getId(), new PaymentRefundRequestedEvent(
+                order.getId(), order.getUserId(), gatewayReference, amount, reason));
     }
 
     private void markPaid(Order order) {
@@ -155,8 +245,8 @@ public class OrderService {
         return order.getItems().stream().map(i -> new OrderLine(i.getProductId(), i.getQuantity())).toList();
     }
 
-    private static String newOrderNumber() {
+    private String newOrderNumber() {
         return "QC" + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE)
-                + String.format("%06d", ThreadLocalRandom.current().nextInt(1_000_000));
+                + String.format("%06d", orders.nextOrderNumber());
     }
 }

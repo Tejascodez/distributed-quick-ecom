@@ -3,12 +3,14 @@ package com.ims.order;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 
 import com.ims.common.security.Caller;
 import com.ims.common.security.Roles;
@@ -35,7 +37,7 @@ class OrderController {
     }
 
     record CheckoutRequest(@NotNull UUID storeId, @NotNull UUID deliveryAddressId,
-                           @NotEmpty List<@Valid LineRequest> items) {
+                           @NotEmpty @Size(max = 100) List<@Valid LineRequest> items) {
     }
 
     record StatusRequest(@NotNull OrderStatus status) {
@@ -56,7 +58,15 @@ class OrderController {
         }
     }
 
-    private static final Duration IDEMPOTENCY_TTL = Duration.ofHours(24);
+    /**
+     * Only covers the request in flight. A marker left behind by a crash then blocks retries for seconds, not a day;
+     * once the order exists, the UNIQUE idempotency_key column answers retries.
+     */
+    private static final Duration IN_PROGRESS_TTL = Duration.ofSeconds(30);
+
+    /** OUT_FOR_DELIVERY and DELIVERED come from the rider's pickup and hand-over, never from a person. */
+    private static final Set<OrderStatus> OPS_STATUSES = Set.of(OrderStatus.PICKING, OrderStatus.PACKED,
+            OrderStatus.CANCELLED);
 
     private final OrderService orderService;
     private final OrderRepository orders;
@@ -70,7 +80,8 @@ class OrderController {
 
     /**
      * Checkout. The client-generated Idempotency-Key makes retries over flaky mobile networks safe:
-     * Redis SETNX rejects concurrent duplicates fast, the UNIQUE column is the durable guarantee.
+     * a completed order is returned as is, Redis SETNX rejects concurrent duplicates fast, and the UNIQUE column
+     * is the durable guarantee.
      */
     @PostMapping
     ResponseEntity<OrderView> checkout(Caller caller,
@@ -78,7 +89,11 @@ class OrderController {
                                        @Valid @RequestBody CheckoutRequest req) {
         UUID userId = caller.userId();
         String scopedKey = userId + ":" + idempotencyKey;
-        Boolean first = redis.opsForValue().setIfAbsent("idem:" + scopedKey, "1", IDEMPOTENCY_TTL);
+        var existing = orders.findByIdempotencyKey(scopedKey);
+        if (existing.isPresent()) {
+            return ResponseEntity.ok(OrderView.of(existing.get()));
+        }
+        Boolean first = redis.opsForValue().setIfAbsent("idem:" + scopedKey, "1", IN_PROGRESS_TTL);
         if (!Boolean.TRUE.equals(first)) {
             return orders.findByIdempotencyKey(scopedKey)
                     .map(o -> ResponseEntity.ok(OrderView.of(o)))
@@ -88,6 +103,11 @@ class OrderController {
             var lines = req.items().stream().map(l -> new OrderService.CheckoutLine(l.productId(), l.quantity())).toList();
             Order order = orderService.create(userId, req.storeId(), req.deliveryAddressId(), lines, scopedKey);
             return ResponseEntity.status(HttpStatus.CREATED).body(OrderView.of(order));
+        } catch (DataIntegrityViolationException e) {
+            // Raced another request with the same key past the marker: its order is the answer.
+            return orders.findByIdempotencyKey(scopedKey)
+                    .map(o -> ResponseEntity.ok(OrderView.of(o)))
+                    .orElseThrow(() -> e);
         } catch (RuntimeException e) {
             redis.delete("idem:" + scopedKey); // allow the client to retry a failed attempt
             throw e;
@@ -104,6 +124,10 @@ class OrderController {
     @PatchMapping("/{id}/status")
     OrderView advance(Caller caller, @PathVariable UUID id, @Valid @RequestBody StatusRequest req) {
         caller.requireAnyRole(Roles.ADMIN, Roles.STORE_OPS);
+        if (!OPS_STATUSES.contains(req.status())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only " + OPS_STATUSES + " can be set here; delivery-service sets the delivery statuses");
+        }
         orderService.advance(id, req.status());
         return get(caller, id);
     }
