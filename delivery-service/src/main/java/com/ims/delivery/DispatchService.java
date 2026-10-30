@@ -156,31 +156,35 @@ class DispatchService {
     }
 
     /**
-     * Order cancelled upstream. Stops dispatching it and frees its rider if they haven't picked it up yet.
-     * Runs under the same per-order lock as the assignment insert, so a dispatch in flight either sees the
-     * cancellation or has already committed the assignment this then cancels.
+     * Order cancelled upstream. Stops dispatching it and ends its delivery, freeing the rider. The cancel wins even
+     * after pickup: order-service has already refunded the customer, so a rider who picked it up returns it to the
+     * store (delivered then answers 409). Runs under the same per-order lock as the assignment insert, so a dispatch
+     * in flight either sees the cancellation or has already committed the assignment this then cancels.
      */
     void cancel(UUID orderId, UUID storeId) {
         redis.opsForZSet().remove(RiderKeys.PENDING, member(orderId, storeId));
-        List<UUID> freed = tx.execute(s -> {
+        record Freed(UUID partnerId, boolean pickedUp) {
+        }
+        List<Freed> freed = tx.execute(s -> {
             lockOrder(orderId);
             jdbc.update("INSERT INTO cancelled_orders (order_id) VALUES (?) ON CONFLICT DO NOTHING", orderId);
-            List<UUID> partner = jdbc.query("""
+            List<Freed> partner = jdbc.query("""
                     UPDATE delivery_assignments SET cancelled_at = now()
-                    WHERE order_id = ? AND picked_up_at IS NULL AND delivered_at IS NULL AND cancelled_at IS NULL
-                    RETURNING partner_id
-                    """, (rs, i) -> rs.getObject(1, UUID.class), orderId);
-            partner.forEach(id -> jdbc.update("UPDATE delivery_partners SET current_status = 'IDLE' WHERE id = ?", id));
+                    WHERE order_id = ? AND delivered_at IS NULL AND cancelled_at IS NULL
+                    RETURNING partner_id, picked_up_at IS NOT NULL
+                    """, (rs, i) -> new Freed(rs.getObject(1, UUID.class), rs.getBoolean(2)), orderId);
+            partner.forEach(f -> jdbc.update("UPDATE delivery_partners SET current_status = 'IDLE' WHERE id = ?",
+                    f.partnerId()));
             return partner;
         });
         if (!freed.isEmpty()) {
-            pool.release(freed.getFirst(), orderId);
-            log.info("Order {} cancelled; rider {} freed", orderId, freed.getFirst());
-        } else if (Boolean.TRUE.equals(jdbc.queryForObject("""
-                SELECT EXISTS (SELECT 1 FROM delivery_assignments
-                               WHERE order_id = ? AND picked_up_at IS NOT NULL AND delivered_at IS NULL)
-                """, Boolean.class, orderId))) {
-            log.warn("Order {} cancelled after pickup; the rider must return it to the store", orderId);
+            Freed f = freed.getFirst();
+            pool.release(f.partnerId(), orderId);
+            if (f.pickedUp()) {
+                log.warn("Order {} cancelled after pickup; rider {} must return it to the store", orderId, f.partnerId());
+            } else {
+                log.info("Order {} cancelled; rider {} freed", orderId, f.partnerId());
+            }
         }
     }
 

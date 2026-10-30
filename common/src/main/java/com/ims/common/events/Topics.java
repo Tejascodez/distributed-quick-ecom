@@ -11,6 +11,7 @@ public final class Topics {
     public static final String ORDER_PAID = "order-paid-event";
     public static final String ORDER_CANCELLED = "order-cancelled";
     public static final String RIDER_ASSIGNED = "rider-assigned";
+    public static final String DELIVERY_PROGRESS = "delivery-progress";
     public static final String ORDER_STATUS_CHANGED = "order-status-changed";
 
     private Topics() {

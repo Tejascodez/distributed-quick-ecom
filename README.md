@@ -125,12 +125,14 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   redelivery, the reconciler, 500 buyers racing for 10 units, and the saga over real Kafka including the DLT.
 - `order-service`: webhook HMAC verification (unit), plus integration tests against Postgres + Redis + Kafka
   containers with the catalog and address clients mocked: every saga path including out-of-order and duplicate
-  payments, refunds and the amount check (asserted on `outbox_events`), racing inventory/payment replies,
+  payments, refunds and the amount check (asserted on `outbox_events`), delivery progress (unpacked pickups,
+  out-of-order, duplicate and post-cancel steps), racing inventory/payment replies,
   50 parallel checkouts with one Idempotency-Key, the signed webhook over HTTP, the timeout job, and the DLT.
 - `delivery-service`: integration tests against Postgres + Redis + Kafka containers: three dispatchers racing
   over 100 orders and 10 constantly pinging riders (no rider double-booked), claim/ping/offline/stale-rider
   races, Redis losing busy markers, cancellations before and after assignment and pickup, a starved store,
-  the rider endpoints over HTTP, and order-paid / order-cancelled over Kafka including the DLT.
+  the rider endpoints over HTTP, delivery-progress publishing and resends, and order-paid / order-cancelled
+  over Kafka including the DLT.
 - `notification-service`: integration tests against Redis + Kafka containers with order-service mocked, over a
   real STOMP WebSocket sent the way Envoy forwards it: who may subscribe to which topic, clients trying to
   publish fake rider positions, refused upgrades (no identity, foreign origin), events and rider pings relayed
@@ -148,8 +150,10 @@ POST /api/v1/payments/webhook
      inventory-service: confirm.lua + Postgres write-behind
      delivery-service: queue -> nearest idle rider (GEOSEARCH + claim.lua) ──> rider-assigned
      notification-service: picker dashboard + customer WebSocket
+  Store ops: PICKING ──> PACKED (optional: pickup moves an unpacked order on)
+  Rider picks up / hands over ──> delivery-progress ──> OUT_FOR_DELIVERY ──> DELIVERED
   Any failure / 10-min timeout ──> CANCELLED ──> order-cancelled ──> release.lua
-     delivery-service: drop from queue, free the rider if not picked up yet
+     delivery-service: drop from queue, end the delivery and free the rider (even after pickup)
      paid already ──> payment-refund-requested
 ```
 
@@ -157,7 +161,8 @@ Every status change also emits `order-status-changed` for notifications.
 
 ### Topics
 `order-created`, `inventory-reserved`, `inventory-rejected`, `payment-success`, `payment-failed`,
-`payment-refund-requested`, `order-paid-event`, `order-cancelled`, `rider-assigned`, `order-status-changed`. See `common/.../Topics.java`.
+`payment-refund-requested`, `order-paid-event`, `order-cancelled`, `rider-assigned`, `delivery-progress`,
+`order-status-changed`. See `common/.../Topics.java`.
 
 ## Design notes
 
@@ -178,6 +183,11 @@ Every status change also emits `order-status-changed` for notifications.
   assignment commits. Riders silent for 60s leave the pool. Postgres is the source of truth for busy riders
   (a partial unique index allows one open assignment per rider), and markers are rebuilt from it at startup
   and every 15s. The dispatch queue is drained per store, so a store with no riders doesn't block the rest.
+- **Delivery status**: OUT_FOR_DELIVERY and DELIVERED are set only by the rider's pickup and hand-over (ops
+  get 400), sent as `delivery-progress` events keyed by order id. delivery-service marks each step published
+  once the broker acknowledges it and resends the rest, and order-service applies each step once whatever order
+  they arrive in. A cancel always wins: once order-service has refunded, delivery ends the assignment even after
+  pickup, the rider's "delivered" gets 409, and late steps for the cancelled order are ignored.
 - **WebSocket access**: Envoy authenticates the upgrade; `SubscriptionGuard` then checks every STOMP frame.
   Order topics (status and live rider location) are for the order's customer, store ops and admin; store
   picking feeds for store ops and admin. Clients can't SEND at all, since the simple broker would relay it to
@@ -191,8 +201,8 @@ Every status change also emits `order-status-changed` for notifications.
 - Store ops can watch any store's picking feed and any order: there's no staff-to-store mapping yet.
 - Push uses a logging stub; wire up the Firebase Admin SDK when credentials are available.
 - Rider matching is greedy nearest-first per batch; replace with min-cost matching.
-- Pickup and delivery don't update the order's status in order-service yet (ops set it), and a rider whose
-  assignment is cancelled isn't notified in-app.
+- A rider whose assignment is cancelled isn't notified in-app (they find out when "delivered" returns 409), and
+  returning a cancelled order's items to the store isn't tracked.
 - inventory-service and delivery-service publish to Kafka directly (not via an outbox). inventory-service waits
   for the broker ack and relies on idempotent redelivery instead.
 - Nothing consumes `payment-refund-requested` yet; a payment service would call the gateway's refund API.

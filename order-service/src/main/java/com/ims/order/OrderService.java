@@ -150,7 +150,52 @@ public class OrderService {
         cancel(order, "PAYMENT_FAILED");
     }
 
-    /** Fulfilment progress from the dark store dashboard / rider app. */
+    /** The rider has the order. Redelivered or late steps (already further along) are ignored. */
+    @Transactional
+    public void onPickedUp(UUID orderId) {
+        Order order = load(orderId);
+        if (ignoreDeliveryStep(order, "pickup")) {
+            return;
+        }
+        if (order.getOrderStatus().canTransitionTo(OrderStatus.OUT_FOR_DELIVERY)) {
+            changeStatus(order, OrderStatus.OUT_FOR_DELIVERY);
+        }
+    }
+
+    /** Handed to the customer. Also covers a pickup event that hasn't arrived (or was lost) yet. */
+    @Transactional
+    public void onDelivered(UUID orderId) {
+        Order order = load(orderId);
+        if (ignoreDeliveryStep(order, "delivery")) {
+            return;
+        }
+        if (order.getOrderStatus().canTransitionTo(OrderStatus.OUT_FOR_DELIVERY)) {
+            changeStatus(order, OrderStatus.OUT_FOR_DELIVERY);
+        }
+        if (order.getOrderStatus() == OrderStatus.OUT_FOR_DELIVERY) {
+            changeStatus(order, OrderStatus.DELIVERED);
+        }
+    }
+
+    /**
+     * A cancelled order stays cancelled: the customer has been refunded and delivery-service ends the delivery.
+     * An unpaid order can't have a rider, so that's a bug upstream and goes to the DLT.
+     */
+    private boolean ignoreDeliveryStep(Order order, String step) {
+        switch (order.getOrderStatus()) {
+            case CANCELLED -> {
+                log.warn("Ignoring {} of cancelled order {}; the rider returns it to the store", step, order.getId());
+                return true;
+            }
+            case CREATED, INVENTORY_RESERVED ->
+                    throw new IllegalStateException("Rider " + step + " for unpaid order " + order.getId());
+            default -> {
+                return false;
+            }
+        }
+    }
+
+    /** Fulfilment progress from the dark store dashboard. */
     @Transactional
     public void advance(UUID orderId, OrderStatus next) {
         Order order = load(orderId);

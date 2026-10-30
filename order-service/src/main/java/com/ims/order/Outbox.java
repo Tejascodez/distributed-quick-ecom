@@ -26,9 +26,10 @@ class Outbox {
 
     @Transactional(propagation = Propagation.MANDATORY)
     void publish(String topic, UUID orderId, Object event) {
+        // clock_timestamp(), not the column default now(): rows written in one transaction keep their order.
         jdbc.update("""
-                INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload)
-                VALUES (?, 'Order', ?, ?, ?::jsonb)
+                INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, created_at)
+                VALUES (?, 'Order', ?, ?, ?::jsonb, clock_timestamp())
                 """, UUID.randomUUID(), orderId.toString(), topic, json.writeValueAsString(event));
     }
 

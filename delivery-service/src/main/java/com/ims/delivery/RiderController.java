@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 
+import com.ims.common.events.DeliveryProgressEvent.Stage;
 import com.ims.common.security.Caller;
 import com.ims.common.security.Roles;
 import org.springframework.dao.DuplicateKeyException;
@@ -50,12 +51,15 @@ class RiderController {
     private final JdbcTemplate jdbc;
     private final StringRedisTemplate redis;
     private final RiderPool pool;
+    private final ProgressPublisher progress;
     private final JsonMapper json;
 
-    RiderController(JdbcTemplate jdbc, StringRedisTemplate redis, RiderPool pool, JsonMapper json) {
+    RiderController(JdbcTemplate jdbc, StringRedisTemplate redis, RiderPool pool, ProgressPublisher progress,
+                    JsonMapper json) {
         this.jdbc = jdbc;
         this.redis = redis;
         this.pool = pool;
+        this.progress = progress;
         this.json = json;
     }
 
@@ -110,6 +114,7 @@ class RiderController {
         }
         jdbc.update("UPDATE delivery_assignments SET picked_up_at = now() WHERE order_id = ?", orderId);
         jdbc.update("UPDATE delivery_partners SET current_status = 'DELIVERING' WHERE id = ?", state.partnerId());
+        afterCommit(() -> progress.publish(orderId, state.partnerId(), Stage.PICKED_UP));
     }
 
     @PostMapping("/assignments/{orderId}/delivered")
@@ -121,23 +126,30 @@ class RiderController {
         }
         if (state.cancelled() || !state.pickedUp()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    state.cancelled() ? "Order was cancelled" : "Order hasn't been picked up");
+                    state.cancelled() ? "Order was cancelled; return it to the store" : "Order hasn't been picked up");
         }
         jdbc.update("UPDATE delivery_assignments SET delivered_at = now() WHERE order_id = ?", orderId);
         jdbc.update("UPDATE delivery_partners SET current_status = 'IDLE' WHERE id = ?", state.partnerId());
         // After commit, so a rollback can't leave a free rider whose delivery is still open in Postgres.
         // The rider rejoins the idle GEO pool on their next location ping.
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                pool.release(state.partnerId(), orderId);
-            }
+        afterCommit(() -> {
+            pool.release(state.partnerId(), orderId);
+            progress.publish(orderId, state.partnerId(), Stage.DELIVERED);
         });
     }
 
     @ExceptionHandler(DuplicateKeyException.class)
     ResponseEntity<String> duplicate(DuplicateKeyException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body("Rider already registered (same user or phone)");
+    }
+
+    private static void afterCommit(Runnable action) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                action.run();
+            }
+        });
     }
 
     /** Locks the assignment row, so two taps from the rider app are applied one after the other. */

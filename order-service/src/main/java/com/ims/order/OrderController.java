@@ -3,6 +3,7 @@ package com.ims.order;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
@@ -62,6 +63,10 @@ class OrderController {
      */
     private static final Duration IN_PROGRESS_TTL = Duration.ofSeconds(30);
 
+    /** OUT_FOR_DELIVERY and DELIVERED come from the rider's pickup and hand-over, never from a person. */
+    private static final Set<OrderStatus> OPS_STATUSES = Set.of(OrderStatus.PICKING, OrderStatus.PACKED,
+            OrderStatus.CANCELLED);
+
     private final OrderService orderService;
     private final OrderRepository orders;
     private final StringRedisTemplate redis;
@@ -118,6 +123,10 @@ class OrderController {
     @PatchMapping("/{id}/status")
     OrderView advance(Caller caller, @PathVariable UUID id, @Valid @RequestBody StatusRequest req) {
         caller.requireAnyRole(Roles.ADMIN, Roles.STORE_OPS);
+        if (!OPS_STATUSES.contains(req.status())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only " + OPS_STATUSES + " can be set here; delivery-service sets the delivery statuses");
+        }
         orderService.advance(id, req.status());
         return get(caller, id);
     }
