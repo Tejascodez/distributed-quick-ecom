@@ -131,6 +131,10 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   over 100 orders and 10 constantly pinging riders (no rider double-booked), claim/ping/offline/stale-rider
   races, Redis losing busy markers, cancellations before and after assignment and pickup, a starved store,
   the rider endpoints over HTTP, and order-paid / order-cancelled over Kafka including the DLT.
+- `notification-service`: integration tests against Redis + Kafka containers with order-service mocked, over a
+  real STOMP WebSocket sent the way Envoy forwards it: who may subscribe to which topic, clients trying to
+  publish fake rider positions, refused upgrades (no identity, foreign origin), events and rider pings relayed
+  to the right subscribers, and the DLT.
 
 ## Checkout saga
 
@@ -166,19 +170,25 @@ Every status change also emits `order-status-changed` for notifications.
 - **Outbox**: order-service never writes to Kafka directly. Debezium's EventRouter routes rows by
   `event_type` (= topic name), keyed by `aggregate_id` (= order id), which keeps per-order ordering.
 - **Concurrency**: `orders.version` (optimistic locking) serializes concurrent saga replies; conflicts are
-  retried. Records that can never succeed (malformed, unknown order) go to `<topic>-dlt` in order-service and
-  inventory-service.
+  retried. Records that can never succeed (malformed, unknown order) go to `<topic>-dlt` in every consuming
+  service.
 - **Rider pool**: online, idle riders live in a Redis GEO set. `claim.lua` takes a rider out of the pool and
   sets their busy marker in one step, and `ping.lua` only re-adds a rider who is online and not busy, so a
   location ping racing a claim can't double-book anyone. A claim's marker has a 2-minute TTL until its
   assignment commits. Riders silent for 60s leave the pool. Postgres is the source of truth for busy riders
   (a partial unique index allows one open assignment per rider), and markers are rebuilt from it at startup
   and every 15s. The dispatch queue is drained per store, so a store with no riders doesn't block the rest.
+- **WebSocket access**: Envoy authenticates the upgrade; `SubscriptionGuard` then checks every STOMP frame.
+  Order topics (status and live rider location) are for the order's customer, store ops and admin; store
+  picking feeds for store ops and admin. Clients can't SEND at all, since the simple broker would relay it to
+  subscribers. Order owners are learned from order events and cached in Redis; a subscriber the events haven't
+  covered yet is checked by asking order-service, as them, for the order.
 - **Geo**: `ST_DWithin` on a geography GiST index for "which store serves me". Stores also carry an H3
   res-8 cell for cell-based partitioning and caching.
 
 ## Known gaps (next steps)
 
+- Store ops can watch any store's picking feed and any order: there's no staff-to-store mapping yet.
 - Push uses a logging stub; wire up the Firebase Admin SDK when credentials are available.
 - Rider matching is greedy nearest-first per batch; replace with min-cost matching.
 - Pickup and delivery don't update the order's status in order-service yet (ops set it), and a rider whose
