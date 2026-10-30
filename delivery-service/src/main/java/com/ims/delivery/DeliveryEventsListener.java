@@ -1,5 +1,6 @@
 package com.ims.delivery;
 
+import com.ims.common.events.OrderCancelledEvent;
 import com.ims.common.events.OrderPaidEvent;
 import com.ims.common.events.Topics;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -21,5 +22,11 @@ class DeliveryEventsListener {
     void onOrderPaid(String payload) {
         var event = json.readValue(payload, OrderPaidEvent.class);
         dispatch.enqueue(event.orderId(), event.storeId());
+    }
+
+    @KafkaListener(topics = Topics.ORDER_CANCELLED)
+    void onOrderCancelled(String payload) {
+        var event = json.readValue(payload, OrderCancelledEvent.class);
+        dispatch.cancel(event.orderId(), event.storeId());
     }
 }

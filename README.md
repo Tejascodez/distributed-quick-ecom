@@ -127,6 +127,10 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   containers with the catalog and address clients mocked: every saga path including out-of-order and duplicate
   payments, refunds and the amount check (asserted on `outbox_events`), racing inventory/payment replies,
   50 parallel checkouts with one Idempotency-Key, the signed webhook over HTTP, the timeout job, and the DLT.
+- `delivery-service`: integration tests against Postgres + Redis + Kafka containers: three dispatchers racing
+  over 100 orders and 10 constantly pinging riders (no rider double-booked), claim/ping/offline/stale-rider
+  races, Redis losing busy markers, cancellations before and after assignment and pickup, a starved store,
+  the rider endpoints over HTTP, and order-paid / order-cancelled over Kafka including the DLT.
 
 ## Checkout saga
 
@@ -138,9 +142,10 @@ POST /api/v1/payments/webhook
   order-service ── outbox ──> payment-success | payment-failed
   order-service: reserved + paid ──> PAID ──> order-paid-event
      inventory-service: confirm.lua + Postgres write-behind
-     delivery-service: queue -> nearest idle rider (GEOSEARCH + ZREM claim) ──> rider-assigned
+     delivery-service: queue -> nearest idle rider (GEOSEARCH + claim.lua) ──> rider-assigned
      notification-service: picker dashboard + customer WebSocket
   Any failure / 10-min timeout ──> CANCELLED ──> order-cancelled ──> release.lua
+     delivery-service: drop from queue, free the rider if not picked up yet
      paid already ──> payment-refund-requested
 ```
 
@@ -163,6 +168,12 @@ Every status change also emits `order-status-changed` for notifications.
 - **Concurrency**: `orders.version` (optimistic locking) serializes concurrent saga replies; conflicts are
   retried. Records that can never succeed (malformed, unknown order) go to `<topic>-dlt` in order-service and
   inventory-service.
+- **Rider pool**: online, idle riders live in a Redis GEO set. `claim.lua` takes a rider out of the pool and
+  sets their busy marker in one step, and `ping.lua` only re-adds a rider who is online and not busy, so a
+  location ping racing a claim can't double-book anyone. A claim's marker has a 2-minute TTL until its
+  assignment commits. Riders silent for 60s leave the pool. Postgres is the source of truth for busy riders
+  (a partial unique index allows one open assignment per rider), and markers are rebuilt from it at startup
+  and every 15s. The dispatch queue is drained per store, so a store with no riders doesn't block the rest.
 - **Geo**: `ST_DWithin` on a geography GiST index for "which store serves me". Stores also carry an H3
   res-8 cell for cell-based partitioning and caching.
 
@@ -170,6 +181,8 @@ Every status change also emits `order-status-changed` for notifications.
 
 - Push uses a logging stub; wire up the Firebase Admin SDK when credentials are available.
 - Rider matching is greedy nearest-first per batch; replace with min-cost matching.
+- Pickup and delivery don't update the order's status in order-service yet (ops set it), and a rider whose
+  assignment is cancelled isn't notified in-app.
 - inventory-service and delivery-service publish to Kafka directly (not via an outbox). inventory-service waits
   for the broker ack and relies on idempotent redelivery instead.
 - Nothing consumes `payment-refund-requested` yet; a payment service would call the gateway's refund API.
