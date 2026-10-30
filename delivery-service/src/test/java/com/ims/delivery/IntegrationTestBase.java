@@ -58,7 +58,7 @@ abstract class IntegrationTestBase {
     /** Topics exist before the listeners subscribe, so the first test doesn't wait on auto-creation. */
     private static void createTopics() {
         List<String> names = List.of(Topics.ORDER_PAID, Topics.ORDER_CANCELLED, Topics.RIDER_ASSIGNED,
-                Topics.ORDER_PAID + "-dlt", Topics.ORDER_CANCELLED + "-dlt");
+                Topics.DELIVERY_PROGRESS, Topics.ORDER_PAID + "-dlt", Topics.ORDER_CANCELLED + "-dlt");
         try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers()))) {
             admin.createTopics(names.stream().map(n -> new NewTopic(n, 1, (short) 1)).toList()).all().get();
         } catch (Exception e) {

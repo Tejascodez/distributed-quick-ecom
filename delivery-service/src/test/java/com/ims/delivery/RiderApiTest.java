@@ -1,5 +1,6 @@
 package com.ims.delivery;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -11,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /** Rider app endpoints over real HTTP, sent the way Envoy forwards them. */
 class RiderApiTest extends IntegrationTestBase {
@@ -43,6 +45,20 @@ class RiderApiTest extends IntegrationTestBase {
         assertThat(marker(rider)).isNull();
         ping(rider, 0.5);
         assertThat(idle(rider)).isTrue();
+        await().atMost(Duration.ofSeconds(30)).until(() -> published("picked_up_published_at")
+                && published("delivered_published_at")); // the broker acknowledged both steps
+    }
+
+    @Test
+    void deliveryCancelledAfterPickupCannotBeCompleted() {
+        onlineRider(0.5);
+        dispatch.tryAssign(order, store);
+        UUID rider = assignedRider(order);
+        assertThat(post(rider, "/assignments/" + order + "/picked-up", null)).isEqualTo(200);
+
+        dispatch.cancel(order, store);
+
+        assertThat(post(rider, "/assignments/" + order + "/delivered", null)).isEqualTo(409);
     }
 
     @Test
@@ -98,6 +114,11 @@ class RiderApiTest extends IntegrationTestBase {
 
         assertThat(postAsAdmin("/partners", first)).isEqualTo(201);
         assertThat(postAsAdmin("/partners", second)).isEqualTo(409);
+    }
+
+    private boolean published(String column) {
+        return jdbc.queryForObject("SELECT " + column + " IS NOT NULL FROM delivery_assignments WHERE order_id = ?",
+                Boolean.class, order);
     }
 
     private int post(UUID rider, String path, Object body) {

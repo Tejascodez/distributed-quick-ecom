@@ -24,7 +24,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Checkout idempotency and the payment webhook over real HTTP, sent the way Envoy forwards them. */
+/** Checkout idempotency, ops status changes and the payment webhook over real HTTP, sent the way Envoy forwards them. */
 class HttpApiTest extends IntegrationTestBase {
 
     @Value("${local.server.port}")
@@ -148,6 +148,25 @@ class HttpApiTest extends IntegrationTestBase {
 
         assertThat(response.getStatusCode().value()).isEqualTo(202);
         assertThat(published(order, Topics.PAYMENT_FAILED)).hasSize(1);
+    }
+
+    @Test
+    void opsCannotSetDeliveryStatusesByHand() {
+        Order order = newOrder();
+        orderService.onInventoryReserved(order.getId());
+        orderService.onPaymentSucceeded(order.getId(), "pay_1" + run, OrderSagaTest.PAYABLE);
+
+        assertThat(setStatus(order, "OUT_FOR_DELIVERY").getStatusCode().value()).isEqualTo(400);
+        assertThat(setStatus(order, "DELIVERED").getStatusCode().value()).isEqualTo(400);
+        assertThat(setStatus(order, "PICKING").getStatusCode().value()).isEqualTo(200);
+        assertThat(reload(order).getOrderStatus()).isEqualTo(OrderStatus.PICKING);
+    }
+
+    private ResponseEntity<String> setStatus(Order order, String status) {
+        return http.patch().uri("/api/v1/orders/{id}/status", order.getId())
+                .header(Caller.USER_ID_HEADER, UUID.randomUUID().toString()).header(Caller.ROLE_HEADER, "STORE_OPS")
+                .contentType(MediaType.APPLICATION_JSON).body(Map.of("status", status))
+                .retrieve().onStatus(s -> true, (req, res) -> { }).toEntity(String.class);
     }
 
     private ResponseEntity<String> checkout(String idempotencyKey) {

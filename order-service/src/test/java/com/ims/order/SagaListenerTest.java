@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.ims.common.events.DeliveryProgressEvent;
+import com.ims.common.events.DeliveryProgressEvent.Stage;
 import com.ims.common.events.InventoryResultEvent;
 import com.ims.common.events.PaymentResultEvent;
 import com.ims.common.events.Topics;
@@ -38,6 +40,29 @@ class SagaListenerTest extends IntegrationTestBase {
                 new PaymentResultEvent(order.getId(), "pay_1" + run, true, OrderSagaTest.PAYABLE));
 
         await().atMost(TIMEOUT).until(() -> reload(order).getOrderStatus() == OrderStatus.PAID);
+    }
+
+    @Test
+    void riderHandOverOverKafkaDeliversTheOrder() {
+        Order order = newOrder();
+        orderService.onInventoryReserved(order.getId());
+        orderService.onPaymentSucceeded(order.getId(), "pay_1" + run, OrderSagaTest.PAYABLE);
+        UUID rider = UUID.randomUUID();
+
+        send(Topics.DELIVERY_PROGRESS, order.getId(), new DeliveryProgressEvent(order.getId(), rider, Stage.PICKED_UP));
+        send(Topics.DELIVERY_PROGRESS, order.getId(), new DeliveryProgressEvent(order.getId(), rider, Stage.DELIVERED));
+
+        await().atMost(TIMEOUT).until(() -> reload(order).getOrderStatus() == OrderStatus.DELIVERED);
+    }
+
+    @Test
+    void pickupOfAnUnpaidOrderIsDeadLettered() {
+        Order order = newOrder();
+
+        send(Topics.DELIVERY_PROGRESS, order.getId(),
+                new DeliveryProgressEvent(order.getId(), UUID.randomUUID(), Stage.PICKED_UP));
+
+        await().atMost(TIMEOUT).until(() -> deadLettered(Topics.DELIVERY_PROGRESS, order.getId()));
     }
 
     @Test

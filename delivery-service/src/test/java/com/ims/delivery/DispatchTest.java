@@ -192,16 +192,18 @@ class DispatchTest extends IntegrationTestBase {
         assertThat(idle(rider)).isTrue();
     }
 
+    /** order-service has already refunded the customer, so the cancel wins and the rider returns the order. */
     @Test
-    void cancelledAfterPickupKeepsTheDelivery() {
+    void cancelledAfterPickupEndsTheDeliveryToo() {
         UUID rider = onlineRider(0.5);
         dispatch.tryAssign(order, store);
         jdbc.update("UPDATE delivery_assignments SET picked_up_at = now() WHERE order_id = ?", order);
 
         dispatch.cancel(order, store);
 
-        assertThat(assignedRider(order)).isEqualTo(rider);
-        assertThat(marker(rider)).isEqualTo(order.toString());
+        assertThat(assignedRider(order)).isNull();
+        assertThat(marker(rider)).isNull();
+        assertThat(partnerStatus(rider)).isEqualTo("IDLE");
     }
 
     /**

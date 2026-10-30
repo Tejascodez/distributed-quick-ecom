@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.ims.common.events.DeliveryProgressEvent;
+import com.ims.common.events.DeliveryProgressEvent.Stage;
 import com.ims.common.events.OrderCancelledEvent;
 import com.ims.common.events.OrderPaidEvent;
 import com.ims.common.events.RiderAssignedEvent;
@@ -30,6 +32,9 @@ class DeliveryEventsTest extends IntegrationTestBase {
 
     @Autowired
     JsonMapper json;
+
+    @Autowired
+    ProgressPublisher progress;
 
     final UUID order = UUID.randomUUID();
 
@@ -67,6 +72,23 @@ class DeliveryEventsTest extends IntegrationTestBase {
         // Must hold across a full drain cycle (every 5s) after the late order-paid is queued.
         await().during(Duration.ofSeconds(7)).atMost(Duration.ofSeconds(10)).until(() -> assignedRider(order) == null);
         assertThat(idle(rider)).isTrue();
+    }
+
+    /** A pickup whose send never reached the broker (crash, outage) is resent and then marked published. */
+    @Test
+    void unsentPickupIsRepublished() {
+        UUID rider = onlineRider(0.5);
+        dispatch.tryAssign(order, store);
+        jdbc.update("UPDATE delivery_assignments SET picked_up_at = now() - interval '1 minute' WHERE order_id = ?", order);
+
+        progress.republishUnsent();
+
+        String sent = await().atMost(TIMEOUT).until(() -> firstRecord(Topics.DELIVERY_PROGRESS), v -> v != null);
+        assertThat(json.readValue(sent, DeliveryProgressEvent.class))
+                .isEqualTo(new DeliveryProgressEvent(order, rider, Stage.PICKED_UP));
+        await().atMost(TIMEOUT).until(() -> jdbc.queryForObject(
+                "SELECT picked_up_published_at IS NOT NULL FROM delivery_assignments WHERE order_id = ?",
+                Boolean.class, order));
     }
 
     @Test

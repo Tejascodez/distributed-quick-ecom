@@ -62,7 +62,8 @@ abstract class IntegrationTestBase {
     private static void createTopics() {
         List<String> names = List.of(Topics.INVENTORY_RESERVED, Topics.INVENTORY_REJECTED, Topics.PAYMENT_SUCCESS,
                 Topics.PAYMENT_FAILED, Topics.INVENTORY_RESERVED + "-dlt", Topics.INVENTORY_REJECTED + "-dlt",
-                Topics.PAYMENT_SUCCESS + "-dlt", Topics.PAYMENT_FAILED + "-dlt");
+                Topics.PAYMENT_SUCCESS + "-dlt", Topics.PAYMENT_FAILED + "-dlt", Topics.DELIVERY_PROGRESS,
+                Topics.DELIVERY_PROGRESS + "-dlt");
         try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers()))) {
             admin.createTopics(names.stream().map(n -> new NewTopic(n, 1, (short) 1)).toList()).all().get();
         } catch (Exception e) {
