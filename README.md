@@ -121,6 +121,9 @@ Checkout requires a delivery address owned by the caller that lies inside the ch
   against throwaway Postgres + Redis containers, never Neon. Each request is verified against the
   service's JWKS and forwarded with Envoy's headers, so auth, roles, refresh rotation and addresses are
   tested end to end. Containers start once per JVM and are shared by all test classes.
+- `dark-store-service`: integration tests over HTTP against a PostGIS container: nearest serving store,
+  overlapping delivery areas, taking a store out of service and back, role checks, coordinate and radius
+  validation, and the capped product lookup.
 - `inventory-service`: integration tests against Postgres + Redis + Kafka containers: reservation paths and
   redelivery, the reconciler, 500 buyers racing for 10 units, and the saga over real Kafka including the DLT.
 - `order-service`: webhook HMAC verification (unit), plus integration tests against Postgres + Redis + Kafka
@@ -194,7 +197,8 @@ Every status change also emits `order-status-changed` for notifications.
   subscribers. Order owners are learned from order events and cached in Redis; a subscriber the events haven't
   covered yet is checked by asking order-service, as them, for the order.
 - **Geo**: `ST_DWithin` on a geography GiST index for "which store serves me". Stores also carry an H3
-  res-8 cell for cell-based partitioning and caching.
+  res-8 cell for cell-based partitioning and caching. Store ops can mark a store OVERLOADED or INACTIVE
+  (`PATCH /api/v1/stores/{id}/status`); only ACTIVE stores are found or accept checkouts.
 
 ## Known gaps (next steps)
 

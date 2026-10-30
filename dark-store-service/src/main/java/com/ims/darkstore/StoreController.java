@@ -4,8 +4,13 @@ import java.util.List;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 
 import com.uber.h3core.H3Core;
 import com.ims.common.security.Caller;
@@ -15,7 +20,9 @@ import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.PrecisionModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -39,9 +46,19 @@ class StoreController {
         }
     }
 
-    record CreateStoreRequest(@NotBlank String name, @NotBlank String address, double lat, double lng,
-                              @Positive int serviceableRadiusMeters) {
+    record CreateStoreRequest(@NotBlank String name, @NotBlank String address,
+                              @DecimalMin("-90") @DecimalMax("90") double lat,
+                              @DecimalMin("-180") @DecimalMax("180") double lng,
+                              @Positive @Max(MAX_RADIUS_METERS) int serviceableRadiusMeters) {
     }
+
+    record StatusRequest(@NotNull DarkStore.Status status) {
+    }
+
+    /** Quick commerce delivers within minutes; anything wider than this is a typo. */
+    static final int MAX_RADIUS_METERS = 20_000;
+    /** order-service asks for one checkout's products at a time; checkout carts are capped at the same size. */
+    static final int MAX_PRODUCTS_PER_LOOKUP = 100;
 
     private static final GeometryFactory WGS84 = new GeometryFactory(new PrecisionModel(), 4326);
 
@@ -60,7 +77,8 @@ class StoreController {
 
     /** Maps a customer's coordinates to the dark store that will fulfil their cart. */
     @GetMapping("/serviceable")
-    StoreView serviceable(@RequestParam double lat, @RequestParam double lng) {
+    StoreView serviceable(@RequestParam @DecimalMin("-90") @DecimalMax("90") double lat,
+                          @RequestParam @DecimalMin("-180") @DecimalMax("180") double lng) {
         return stores.findServiceable(lat, lng).map(StoreView::of)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Location not serviceable"));
     }
@@ -70,7 +88,9 @@ class StoreController {
 
     /** Used by order-service at checkout: can this store deliver to the customer's address? */
     @GetMapping("/{id}/delivers-to")
-    DeliveryCheck deliversTo(@PathVariable UUID id, @RequestParam double lat, @RequestParam double lng) {
+    DeliveryCheck deliversTo(@PathVariable UUID id,
+                             @RequestParam @DecimalMin("-90") @DecimalMax("90") double lat,
+                             @RequestParam @DecimalMin("-180") @DecimalMax("180") double lng) {
         return new DeliveryCheck(id, stores.deliversTo(id, lat, lng));
     }
 
@@ -90,9 +110,19 @@ class StoreController {
                 req.serviceableRadiusMeters())));
     }
 
+    /** Take a store out of (or back into) service, e.g. OVERLOADED during a rush. */
+    @PatchMapping("/{id}/status")
+    @Transactional
+    StoreView setStatus(Caller caller, @PathVariable UUID id, @Valid @RequestBody StatusRequest req) {
+        caller.requireAnyRole(Roles.ADMIN, Roles.STORE_OPS);
+        DarkStore store = stores.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        store.setStatus(req.status());
+        return StoreView.of(store);
+    }
+
     /** Price lookup used by order-service to snapshot authoritative prices at checkout. */
     @GetMapping("/products")
-    List<Product> products(@RequestParam List<UUID> ids) {
+    List<Product> products(@RequestParam @Size(max = MAX_PRODUCTS_PER_LOOKUP) List<UUID> ids) {
         return products.findAllById(ids);
     }
 }

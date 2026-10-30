@@ -1,5 +1,6 @@
 package com.ims.darkstore;
 
+import java.time.Instant;
 import java.util.UUID;
 
 import jakarta.persistence.Column;
@@ -7,6 +8,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 
 import org.locationtech.jts.geom.Point;
@@ -36,6 +38,9 @@ public class DarkStore {
     @Enumerated(EnumType.STRING)
     private Status status;
 
+    @Column(name = "updated_at")
+    private Instant updatedAt;
+
     protected DarkStore() {
     }
 
@@ -47,6 +52,17 @@ public class DarkStore {
         this.h3Cell = h3Cell;
         this.serviceableRadiusMeters = serviceableRadiusMeters;
         this.status = Status.ACTIVE;
+        this.updatedAt = Instant.now();
+    }
+
+    /** OVERLOADED or INACTIVE stores stop taking new orders: lookups and delivers-to only match ACTIVE ones. */
+    public void setStatus(Status status) {
+        this.status = status;
+    }
+
+    @PreUpdate
+    void touch() {
+        updatedAt = Instant.now();
     }
 
     public UUID getId() { return id; }
@@ -56,4 +72,5 @@ public class DarkStore {
     public long getH3Cell() { return h3Cell; }
     public int getServiceableRadiusMeters() { return serviceableRadiusMeters; }
     public Status getStatus() { return status; }
+    public Instant getUpdatedAt() { return updatedAt; }
 }
